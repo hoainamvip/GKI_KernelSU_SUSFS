@@ -156,47 +156,30 @@ jobs:
       # ============================================================
       # 8. Apply SUSFS kernel patch
       # ============================================================
-      - name: Apply SUSFS kernel patch
-        working-directory: kernel
-        run: |
-          set -e
+- name: Apply SUSFS kernel patch
+  working-directory: kernel
+  run: |
+    set -e
 
-          PATCH="5.10_susfs.patch"
+    echo "Applying SUSFS Android 12 5.10 patch..."
 
-          if [ -f "../susfs/kernel_patches/5.10/${PATCH}" ]; then
-            echo "Applying SUSFS kernel patch..."
-            patch -p1 \
-              < "../susfs/kernel_patches/5.10/${PATCH}"
-          else
-            echo "ERROR: SUSFS 5.10 patch not found"
-            echo
-            find ../susfs/kernel_patches -type f | sort
-            exit 1
-          fi
+    patch -p1 \
+      < "../susfs/kernel_patches/50_add_susfs_in_gki-android12-5.10.patch"
 
       # ============================================================
       # 9. Apply KernelSU SUSFS patch
       # ============================================================
-      - name: Apply KSU SUSFS patch
-        working-directory: kernel
-        run: |
-          set -e
+- name: Apply KernelSU SUSFS patch
+  working-directory: kernel
+  run: |
+    set -e
 
-          if [ -f "../susfs/ksu_patches/ksu_susfs.patch" ]; then
+    echo "Applying KernelSU SUSFS patch..."
 
-            echo "Applying KSU SUSFS patch..."
+    cd KernelSU-Next
 
-            cd KernelSU-Next
-
-            patch -p1 \
-              < "../../susfs/ksu_patches/ksu_susfs.patch"
-
-          else
-
-            echo "WARNING: ksu_susfs.patch not found"
-            echo "Skipping this patch."
-
-          fi
+    patch -p1 \
+      < "../../susfs/kernel_patches/KernelSU/10_enable_susfs_for_ksu.patch"
 
       # ============================================================
       # 10. Check unicorn config
