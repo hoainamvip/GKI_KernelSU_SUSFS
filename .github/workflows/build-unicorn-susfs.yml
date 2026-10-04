@@ -1,0 +1,462 @@
+name: Build unicorn KSU Next + SUSFS
+
+on:
+  workflow_dispatch:
+    inputs:
+      kernel_branch:
+        description: "LineageOS kernel branch"
+        required: true
+        default: "lineage-23.2"
+
+      ksu_ref:
+        description: "KernelSU Next branch/tag"
+        required: true
+        default: "dev"
+
+      susfs_ref:
+        description: "SUSFS branch"
+        required: true
+        default: "gki-android12-5.10"
+
+jobs:
+  build:
+    name: Build Xiaomi 12S Pro unicorn kernel
+    runs-on: ubuntu-22.04
+
+    env:
+      KERNEL_REPO: https://github.com/LineageOS/android_kernel_xiaomi_sm8450.git
+      KERNEL_BRANCH: ${{ inputs.kernel_branch }}
+      KERNEL_DIR: kernel
+      OUT_DIR: out
+
+    steps:
+
+      # ============================================================
+      # 1. Checkout workflow repository
+      # ============================================================
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      # ============================================================
+      # 2. Free GitHub Actions disk space
+      # ============================================================
+      - name: Free disk space
+        run: |
+          sudo rm -rf /usr/local/lib/android
+          sudo rm -rf /usr/share/dotnet
+          sudo rm -rf /opt/ghc
+          sudo docker image prune --all --force || true
+
+      # ============================================================
+      # 3. Install build dependencies
+      # ============================================================
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+
+          sudo apt-get install -y \
+            git \
+            git-lfs \
+            curl \
+            wget \
+            zip \
+            unzip \
+            bc \
+            bison \
+            flex \
+            build-essential \
+            ccache \
+            clang \
+            llvm \
+            lld \
+            gcc-aarch64-linux-gnu \
+            libssl-dev \
+            libelf-dev \
+            libdw-dev \
+            python3 \
+            python3-pip \
+            rsync \
+            device-tree-compiler
+
+      # ============================================================
+      # 4. Clone LineageOS SM8450 / SM8475 kernel
+      # ============================================================
+      - name: Clone kernel source
+        run: |
+          git clone \
+            --depth=1 \
+            --branch "${KERNEL_BRANCH}" \
+            "${KERNEL_REPO}" \
+            "${KERNEL_DIR}"
+
+          cd "${KERNEL_DIR}"
+
+          echo "========================================"
+          echo "Kernel commit:"
+          git log -1 --oneline
+
+          echo
+          echo "Kernel version:"
+          make kernelversion || true
+
+          echo
+          echo "========================================"
+
+      # ============================================================
+      # 5. Install KernelSU Next
+      # ============================================================
+      - name: Install KernelSU Next
+        working-directory: kernel
+        run: |
+          set -e
+
+          curl -LSs \
+            "https://raw.githubusercontent.com/KernelSU-Next/KernelSU-Next/${{ inputs.ksu_ref }}/kernel/setup.sh" \
+            | bash -s "${{ inputs.ksu_ref }}"
+
+          echo
+          echo "KernelSU directory:"
+          ls -la drivers/kernelsu
+
+      # ============================================================
+      # 6. Clone SUSFS
+      # ============================================================
+      - name: Clone SUSFS
+        run: |
+          set -e
+
+          git clone \
+            --depth=1 \
+            --branch "${{ inputs.susfs_ref }}" \
+            https://gitlab.com/simonpunk/susfs4ksu.git \
+            susfs
+
+          echo
+          echo "SUSFS commit:"
+          git -C susfs log -1 --oneline
+
+      # ============================================================
+      # 7. Check SUSFS files
+      # ============================================================
+      - name: Check SUSFS
+        run: |
+          set -e
+
+          echo "SUSFS tree:"
+          find susfs -maxdepth 3 -type f | sort | head -100
+
+          echo
+          echo "Available kernel patches:"
+          find susfs/kernel_patches -type f | sort || true
+
+          echo
+          echo "Available KSU patches:"
+          find susfs/ksu_patches -type f | sort || true
+
+      # ============================================================
+      # 8. Apply SUSFS kernel patch
+      # ============================================================
+      - name: Apply SUSFS kernel patch
+        working-directory: kernel
+        run: |
+          set -e
+
+          PATCH="5.10_susfs.patch"
+
+          if [ -f "../susfs/kernel_patches/5.10/${PATCH}" ]; then
+            echo "Applying SUSFS kernel patch..."
+            patch -p1 \
+              < "../susfs/kernel_patches/5.10/${PATCH}"
+          else
+            echo "ERROR: SUSFS 5.10 patch not found"
+            echo
+            find ../susfs/kernel_patches -type f | sort
+            exit 1
+          fi
+
+      # ============================================================
+      # 9. Apply KernelSU SUSFS patch
+      # ============================================================
+      - name: Apply KSU SUSFS patch
+        working-directory: kernel
+        run: |
+          set -e
+
+          if [ -f "../susfs/ksu_patches/ksu_susfs.patch" ]; then
+
+            echo "Applying KSU SUSFS patch..."
+
+            cd KernelSU-Next
+
+            patch -p1 \
+              < "../../susfs/ksu_patches/ksu_susfs.patch"
+
+          else
+
+            echo "WARNING: ksu_susfs.patch not found"
+            echo "Skipping this patch."
+
+          fi
+
+      # ============================================================
+      # 10. Check unicorn config
+      # ============================================================
+      - name: Check unicorn config
+        working-directory: kernel
+        run: |
+          set -e
+
+          echo "Checking unicorn_GKI.config..."
+
+          test -f \
+            arch/arm64/configs/vendor/unicorn_GKI.config
+
+          echo
+          echo "===== unicorn_GKI.config ====="
+
+          cat \
+            arch/arm64/configs/vendor/unicorn_GKI.config
+
+      # ============================================================
+      # 11. Prepare output directory
+      # ============================================================
+      - name: Prepare build directory
+        run: |
+          mkdir -p "${OUT_DIR}"
+
+      # ============================================================
+      # 12. Configure GKI kernel
+      # ============================================================
+      - name: Configure kernel
+        working-directory: kernel
+        run: |
+          set -e
+
+          export ARCH=arm64
+          export SUBARCH=arm64
+          export LLVM=1
+          export LLVM_IAS=1
+
+          echo "Running GKI defconfig..."
+
+          make \
+            O="../${OUT_DIR}" \
+            ARCH=arm64 \
+            LLVM=1 \
+            LLVM_IAS=1 \
+            gki_defconfig
+
+          echo
+          echo "Merging unicorn configuration..."
+
+          ./scripts/kconfig/merge_config.sh \
+            -m \
+            "../${OUT_DIR}/.config" \
+            "arch/arm64/configs/vendor/unicorn_GKI.config"
+
+      # ============================================================
+      # 13. Enable KSU + SUSFS
+      # ============================================================
+      - name: Enable KSU and SUSFS
+        working-directory: kernel
+        run: |
+          set -e
+
+          CONFIG="../${OUT_DIR}/.config"
+
+          cat >> "${CONFIG}" <<'EOF'
+
+          #
+          # KernelSU Next
+          #
+          CONFIG_KSU=y
+
+          #
+          # SUSFS
+          #
+          CONFIG_KSU_SUSFS=y
+          CONFIG_KSU_SUSFS_HAS_MAGIC_MOUNT=y
+          CONFIG_KSU_SUSFS_SUS_PATH=y
+          CONFIG_KSU_SUSFS_SUS_MOUNT=y
+          CONFIG_KSU_SUSFS_AUTO_ADD_SUS_KSU_DEFAULT_MOUNT=y
+          CONFIG_KSU_SUSFS_AUTO_ADD_SUS_KSUMS_FOR_ALL_PROCS=y
+          CONFIG_KSU_SUSFS_SUS_KSTAT=y
+          CONFIG_KSU_SUSFS_SPOOF_UNAME=y
+          CONFIG_KSU_SUSFS_SUS_MAP=y
+          CONFIG_KSU_SUSFS_OPEN_REDIRECT=y
+          EOF
+
+          echo "Resolving kernel configuration..."
+
+          make \
+            O="../${OUT_DIR}" \
+            ARCH=arm64 \
+            LLVM=1 \
+            LLVM_IAS=1 \
+            olddefconfig
+
+          echo
+          echo "========================================"
+          echo "KSU / SUSFS configuration"
+          echo "========================================"
+
+          grep -E \
+            'CONFIG_KSU|CONFIG_KSU_SUSFS' \
+            "${CONFIG}" || true
+
+      # ============================================================
+      # 14. Build kernel
+      # ============================================================
+      - name: Build kernel
+        working-directory: kernel
+        run: |
+          set -e
+
+          export ARCH=arm64
+          export SUBARCH=arm64
+          export LLVM=1
+          export LLVM_IAS=1
+
+          echo "========================================"
+          echo "Building kernel..."
+          echo "========================================"
+
+          make \
+            O="../${OUT_DIR}" \
+            ARCH=arm64 \
+            LLVM=1 \
+            LLVM_IAS=1 \
+            -j"$(nproc)" \
+            Image \
+            modules \
+            dtbs
+
+      # ============================================================
+      # 15. Install modules
+      # ============================================================
+      - name: Install modules
+        working-directory: kernel
+        run: |
+          set -e
+
+          mkdir -p "../modules"
+
+          make \
+            O="../${OUT_DIR}" \
+            ARCH=arm64 \
+            LLVM=1 \
+            LLVM_IAS=1 \
+            INSTALL_MOD_PATH="../modules" \
+            modules_install
+
+      # ============================================================
+      # 16. Verify kernel
+      # ============================================================
+      - name: Verify kernel
+        run: |
+          set -e
+
+          echo
+          echo "========================================"
+          echo "Kernel version"
+          echo "========================================"
+
+          cat \
+            "${OUT_DIR}/include/config/kernel.release" \
+            2>/dev/null || true
+
+          echo
+          echo "========================================"
+          echo "Kernel Image"
+          echo "========================================"
+
+          ls -lh \
+            "${OUT_DIR}/arch/arm64/boot/Image"
+
+          echo
+          echo "========================================"
+          echo "DTBs"
+          echo "========================================"
+
+          find \
+            "${OUT_DIR}/arch/arm64/boot" \
+            -type f \
+            \( \
+              -name "*.dtb" \
+              -o \
+              -name "*.dtbo" \
+            \) \
+            -print || true
+
+          echo
+          echo "========================================"
+          echo "KSU / SUSFS"
+          echo "========================================"
+
+          grep -E \
+            'CONFIG_KSU|CONFIG_KSU_SUSFS' \
+            "${OUT_DIR}/.config" || true
+
+      # ============================================================
+      # 17. Prepare artifact
+      # ============================================================
+      - name: Prepare artifact
+        run: |
+          set -e
+
+          rm -rf artifact
+          mkdir -p artifact
+
+          cp \
+            "${OUT_DIR}/arch/arm64/boot/Image" \
+            artifact/Image
+
+          cp \
+            "${OUT_DIR}/.config" \
+            artifact/unicorn_KSU_SUSFS.config
+
+          if [ -d "${OUT_DIR}/arch/arm64/boot/dts" ]; then
+            cp -r \
+              "${OUT_DIR}/arch/arm64/boot/dts" \
+              artifact/dts
+          fi
+
+          if [ -d "modules" ]; then
+            cp -r \
+              modules \
+              artifact/modules
+          fi
+
+          cat > artifact/BUILD_INFO.txt <<EOF
+          Device: Xiaomi 12S Pro
+          Codename: unicorn
+          SoC: Qualcomm SM8475
+          Kernel source:
+          ${KERNEL_REPO}
+
+          Kernel branch:
+          ${KERNEL_BRANCH}
+
+          KernelSU Next:
+          ${{ inputs.ksu_ref }}
+
+          SUSFS:
+          ${{ inputs.susfs_ref }}
+
+          Kernel commit:
+          $(git -C kernel rev-parse HEAD)
+
+          Kernel version:
+          $(cat out/include/config/kernel.release 2>/dev/null || echo unknown)
+          EOF
+
+      # ============================================================
+      # 18. Upload artifact
+      # ============================================================
+      - name: Upload kernel
+        uses: actions/upload-artifact@v4
+        with:
+          name: unicorn-KSU-Next-SUSFS
+          path: artifact
+          if-no-files-found: error
+          retention-days: 7
